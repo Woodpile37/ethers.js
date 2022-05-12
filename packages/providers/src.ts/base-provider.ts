@@ -647,8 +647,6 @@ export class BaseProvider extends Provider implements EnsProvider {
      */
 
     constructor(network: Networkish | Promise<Network>) {
-        logger.checkNew(new.target, Provider);
-
         super();
 
         // Events being listened to
