@@ -57,8 +57,14 @@ export class AlchemyProvider extends UrlJsonRpcProvider {
             case "arbitrum-goerli":
                 host = "arb-goerli.g.alchemy.com/v2/";
                 break;
+            case "arbitrum-goerli":
+                host = "arb-goerli.g.alchemy.com/v2/";
+                break;
             case "optimism":
                 host = "opt-mainnet.g.alchemy.com/v2/";
+                break;
+            case "optimism-goerli":
+                host = "opt-goerli.g.alchemy.com/v2/";
                 break;
             case "optimism-goerli":
                 host = "opt-goerli.g.alchemy.com/v2/";
