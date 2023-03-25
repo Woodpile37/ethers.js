@@ -13,7 +13,7 @@
     "@ethersproject/basex": "^5.7.0",
     "ethers": "^5.7.0",
     "scrypt-js": "3.0.1",
-    "solc": "0.7.1"
+    "solc": "0.8.19"
   },
   "description": "Command-Line Interface scripts and releated utilities.",
   "ethereum": "donations.ethers.eth",
