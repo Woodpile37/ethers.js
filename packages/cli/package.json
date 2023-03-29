@@ -7,13 +7,13 @@
     "ethers-ts": "./lib/bin/ethers-ts.js"
   },
   "dependencies": {
-    "@babel/parser": "7.8.4",
-    "@babel/types": "7.8.3",
+    "@babel/parser": "7.21.2",
+    "@babel/types": "7.21.2",
     "@ethersproject/asm": "^5.7.0",
     "@ethersproject/basex": "^5.7.0",
     "ethers": "^5.7.0",
     "scrypt-js": "3.0.1",
-    "solc": "0.7.1"
+    "solc": "0.8.19"
   },
   "description": "Command-Line Interface scripts and releated utilities.",
   "ethereum": "donations.ethers.eth",
