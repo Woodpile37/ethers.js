@@ -13,7 +13,7 @@
     "ethers": "^5.0.0",
     "@ethersproject/shims": "^5.0.0",
     "react": "18.2.0",
-    "react-native": "0.71.3",
+    "react-native": "0.71.4",
     "react-native-get-random-values": "1.5.0"
   },
   "devDependencies": {
