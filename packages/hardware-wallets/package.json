@@ -8,8 +8,8 @@
   },
   "dependencies": {
     "@ledgerhq/hw-app-eth": "6.32.0",
-    "@ledgerhq/hw-transport": "6.28.2",
-    "@ledgerhq/hw-transport-u2f": "5.26.0",
+    "@ledgerhq/hw-transport": "6.28.1",
+    "@ledgerhq/hw-transport-u2f": "5.34.0",
     "ethers": "^5.7.0"
   },
   "description": "Hardware Wallet support for ethers.",
