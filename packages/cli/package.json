@@ -7,7 +7,7 @@
     "ethers-ts": "./lib/bin/ethers-ts.js"
   },
   "dependencies": {
-    "@babel/parser": "7.22.11",
+    "@babel/parser": "7.22.13",
     "@babel/types": "7.22.11",
     "@ethersproject/asm": "^5.7.0",
     "@ethersproject/basex": "^5.7.0",
