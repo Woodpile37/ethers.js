@@ -8595,6 +8595,9 @@ const __$G = (typeof globalThis !== 'undefined' ? globalThis: typeof window !== 
      */
     function ensNormalize(name) {
         try {
+            if (name.length === 0) {
+                throw new Error("empty label");
+            }
             return ens_normalize(name);
         }
         catch (error) {
@@ -8616,6 +8619,7 @@ const __$G = (typeof globalThis !== 'undefined' ? globalThis: typeof window !== 
      */
     function namehash(name) {
         assertArgument(typeof (name) === "string", "invalid ENS name; not a string", "name", name);
+        assertArgument(name.length, `invalid ENS name (empty label)`, "name", name);
         let result = Zeros;
         const comps = ensNameSplit(name);
         while (comps.length) {
