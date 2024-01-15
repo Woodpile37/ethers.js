@@ -7,9 +7,9 @@ import {
 import { encode as base64Encode } from "@ethersproject/base64";
 import { Base58 } from "@ethersproject/basex";
 import { BigNumber, BigNumberish } from "@ethersproject/bignumber";
-import { arrayify, concat, hexConcat, hexDataLength, hexDataSlice, hexlify, hexValue, hexZeroPad, isHexString } from "@ethersproject/bytes";
+import { arrayify, BytesLike, concat, hexConcat, hexDataLength, hexDataSlice, hexlify, hexValue, hexZeroPad, isHexString } from "@ethersproject/bytes";
 import { HashZero } from "@ethersproject/constants";
-import { namehash } from "@ethersproject/hash";
+import { dnsEncode, namehash } from "@ethersproject/hash";
 import { getNetwork, Network, Networkish } from "@ethersproject/networks";
 import { Deferrable, defineReadOnly, getStatic, resolveProperties } from "@ethersproject/properties";
 import { Transaction } from "@ethersproject/transactions";
@@ -24,6 +24,8 @@ import { version } from "./_version";
 const logger = new Logger(version);
 
 import { Formatter } from "./formatter";
+
+const MAX_CCIP_REDIRECTS = 10;
 
 //////////////////////////////
 // Event Serializeing
@@ -257,18 +259,19 @@ const matchers = [
     new RegExp("^eip155:[0-9]+/(erc[0-9]+):(.*)$", "i"),
 ];
 
-function _parseString(result: string): null | string {
+function _parseString(result: string, start: number): null | string {
     try {
-        return toUtf8String(_parseBytes(result));
+        return toUtf8String(_parseBytes(result, start));
     } catch(error) { }
     return null;
 }
 
-function _parseBytes(result: string): null | string {
+function _parseBytes(result: string, start: number): null | string {
     if (result === "0x") { return null; }
 
-    const offset = BigNumber.from(hexDataSlice(result, 0, 32)).toNumber();
+    const offset = BigNumber.from(hexDataSlice(result, start, start + 32)).toNumber();
     const length = BigNumber.from(hexDataSlice(result, offset, offset + 32)).toNumber();
+
     return hexDataSlice(result, offset + 32, offset + 32 + length);
 }
 
@@ -285,6 +288,50 @@ function getIpfsLink(link: string): string {
     return `https:/\/gateway.ipfs.io/ipfs/${ link }`;
 }
 
+function numPad(value: number): Uint8Array {
+    const result = arrayify(value);
+    if (result.length > 32) { throw new Error("internal; should not happen"); }
+
+    const padded = new Uint8Array(32);
+    padded.set(result, 32 - result.length);
+    return padded;
+}
+
+function bytesPad(value: Uint8Array): Uint8Array {
+    if ((value.length % 32) === 0) { return value; }
+
+    const result = new Uint8Array(Math.ceil(value.length / 32) * 32);
+    result.set(value);
+    return result;
+}
+
+// ABI Encodes a series of (bytes, bytes, ...)
+function encodeBytes(datas: Array<BytesLike>) {
+    const result: Array<Uint8Array> = [ ];
+
+    let byteCount = 0;
+
+    // Add place-holders for pointers as we add items
+    for (let i = 0; i < datas.length; i++) {
+        result.push(null);
+        byteCount += 32;
+    }
+
+    for (let i = 0; i < datas.length; i++) {
+        const data = arrayify(datas[i]);
+
+        // Update the bytes offset
+        result[i] = numPad(byteCount);
+
+        // The length and padded value of data
+        result.push(numPad(data.length));
+        result.push(bytesPad(data));
+        byteCount += 32 + Math.ceil(data.length / 32) * 32;
+    }
+
+    return hexConcat(result);
+}
+
 export class Resolver implements EnsResolver {
     readonly provider: BaseProvider;
 
@@ -292,6 +339,9 @@ export class Resolver implements EnsResolver {
     readonly address: string;
 
     readonly _resolvedAddress: null | string;
+
+    // For EIP-2544 names, the ancestor that provided the resolver
+    _supportsEip2544: null | Promise<boolean>;
 
     // The resolvedAddress is only for creating a ReverseLookup resolver
     constructor(provider: BaseProvider, address: string, name: string, resolvedAddress?: string) {
@@ -301,19 +351,62 @@ export class Resolver implements EnsResolver {
         defineReadOnly(this, "_resolvedAddress", resolvedAddress);
     }
 
-    async _fetchBytes(selector: string, parameters?: string): Promise<null | string> {
+    supportsWildcard(): Promise<boolean> {
+        if (!this._supportsEip2544) {
+            // supportsInterface(bytes4 = selector("resolve(bytes,bytes)"))
+            this._supportsEip2544 = this.provider.call({
+                to: this.address,
+                data: "0x01ffc9a79061b92300000000000000000000000000000000000000000000000000000000"
+            }).then((result) => {
+                return BigNumber.from(result).eq(1);
+            }).catch((error) => {
+                if (error.code === Logger.errors.CALL_EXCEPTION) { return false; }
+                // Rethrow the error: link is down, etc. Let future attempts retry.
+                this._supportsEip2544 = null;
+                throw error;
+            });
+        }
+
+        return this._supportsEip2544;
+    }
+
+    async _fetch(selector: string, parameters?: string): Promise<null | string> {
+
         // e.g. keccak256("addr(bytes32,uint256)")
         const tx = {
             to: this.address,
+            ccipReadEnabled: true,
             data: hexConcat([ selector, namehash(this.name), (parameters || "0x") ])
         };
 
+        // Wildcard support; use EIP-2544 to resolve the request
+        let parseBytes = false;
+        if (await this.supportsWildcard()) {
+            parseBytes = true;
+
+            // selector("resolve(bytes,bytes)")
+            tx.data = hexConcat([ "0x9061b923", encodeBytes([ dnsEncode(this.name), tx.data ]) ]);
+        }
+
         try {
-            return _parseBytes(await this.provider.call(tx));
+            let result = await this.provider.call(tx);
+            if ((arrayify(result).length % 32) === 4) {
+                logger.throwError("resolver threw error", Logger.errors.CALL_EXCEPTION, {
+                    transaction: tx, data: result
+                });
+            }
+            if (parseBytes) { result = _parseBytes(result, 0); }
+            return result;
         } catch (error) {
             if (error.code === Logger.errors.CALL_EXCEPTION) { return null; }
-            return null;
+            throw error;
         }
+    }
+
+    async _fetchBytes(selector: string, parameters?: string): Promise<null | string> {
+        const result = await this._fetch(selector, parameters);
+        if (result != null) { return _parseBytes(result, 0); }
+        return null;
     }
 
     _getAddress(coinType: number, hexBytes: string): string {
@@ -385,16 +478,12 @@ export class Resolver implements EnsResolver {
         if (coinType === 60) {
             try {
                 // keccak256("addr(bytes32)")
-                const transaction = {
-                    to: this.address,
-                    data: ("0x3b3b57de" + namehash(this.name).substring(2))
-                };
-                const hexBytes = await this.provider.call(transaction);
+                const result = await this._fetch("0x3b3b57de");
 
                 // No address
-                if (hexBytes === "0x" || hexBytes === HashZero) { return null; }
+                if (result === "0x" || result === HashZero) { return null; }
 
-                return this.provider.formatter.callAddress(hexBytes);
+                return this.provider.formatter.callAddress(result);
             } catch (error) {
                 if (error.code === Logger.errors.CALL_EXCEPTION) { return null; }
                 throw error;
@@ -487,7 +576,7 @@ export class Resolver implements EnsResolver {
                             data: hexConcat([ selector, tokenId ])
                         };
 
-                        let metadataUrl = _parseString(await this.provider.call(tx))
+                        let metadataUrl = _parseString(await this.provider.call(tx), 0);
                         if (metadataUrl == null) { return null; }
                         linkage.push({ type: "metadata-url-base", content: metadataUrl });
 
@@ -646,6 +735,8 @@ export class BaseProvider extends Provider implements EnsProvider {
 
     readonly anyNetwork: boolean;
 
+    disableCcipRead: boolean;
+
 
     /**
      *  ready
@@ -664,6 +755,8 @@ export class BaseProvider extends Provider implements EnsProvider {
         this._events = [];
 
         this._emitted = { block: -2 };
+
+        this.disableCcipRead = false;
 
         this.formatter = new.target.getFormatter();
 
@@ -765,6 +858,46 @@ export class BaseProvider extends Provider implements EnsProvider {
     // @TODO: Remove this and just use getNetwork
     static getNetwork(network: Networkish): Network {
         return getNetwork((network == null) ? "homestead": network);
+    }
+
+    async ccipReadFetch(tx: Transaction, calldata: string, urls: Array<string>): Promise<null | string> {
+        if (this.disableCcipRead || urls.length === 0) { return null; }
+
+        const sender = tx.to.toLowerCase();
+        const data = calldata.toLowerCase();
+
+        const errorMessages: Array<string> = [ ];
+
+        for (let i = 0; i < urls.length; i++) {
+            const url = urls[i];
+
+            // URL expansion
+            const href = url.replace("{sender}", sender).replace("{data}", data);
+
+            // If no {data} is present, use POST; otherwise GET
+            const json: string | null = (url.indexOf("{data}") >= 0) ? null: JSON.stringify({ data, sender });
+
+            const result = await fetchJson({ url: href, errorPassThrough: true }, json, (value, response) => {
+                value.status = response.statusCode;
+                return value;
+            });
+
+            if (result.data) { return result.data; }
+
+            const errorMessage = (result.message || "unknown error");
+
+            // 4xx indicates the result is not present; stop
+            if (result.status >= 400 && result.status < 500) {
+                return logger.throwError(`response not found during CCIP fetch: ${ errorMessage }`, Logger.errors.SERVER_ERROR, { url, errorMessage });
+            }
+
+            // 5xx indicates server issue; try the next url
+            errorMessages.push(errorMessage);
+        }
+
+        return logger.throwError(`error encountered during CCIP fetch: ${ errorMessages.map((m) => JSON.stringify(m)).join(", ") }`, Logger.errors.SERVER_ERROR, {
+            urls, errorMessages
+        });
     }
 
     // Fetches the blockNumber, but will reuse any result that is less
@@ -1495,22 +1628,105 @@ export class BaseProvider extends Provider implements EnsProvider {
         return this.formatter.filter(await resolveProperties(result));
     }
 
-    async call(transaction: Deferrable<TransactionRequest>, blockTag?: BlockTag | Promise<BlockTag>): Promise<string> {
-        await this.getNetwork();
-        const params = await resolveProperties({
-            transaction: this._getTransactionRequest(transaction),
-            blockTag: this._getBlockTag(blockTag)
-        });
+    async _call(transaction: TransactionRequest, blockTag: BlockTag, attempt: number): Promise<string> {
+        if (attempt >= MAX_CCIP_REDIRECTS) {
+            logger.throwError("CCIP read exceeded maximum redirections", Logger.errors.SERVER_ERROR, {
+                redirects: attempt, transaction
+            });
+        }
 
-        const result = await this.perform("call", params);
+        const txSender = transaction.to;
+
+        const result = await this.perform("call", { transaction, blockTag });
+
+        // CCIP Read request via OffchainLookup(address,string[],bytes,bytes4,bytes)
+        if (attempt >= 0 && blockTag === "latest" && txSender != null && result.substring(0, 10) === "0x556f1830" && (hexDataLength(result) % 32 === 4)) {
+            try {
+                const data = hexDataSlice(result, 4);
+
+                // Check the sender of the OffchainLookup matches the transaction
+                const sender = hexDataSlice(data, 0, 32);
+                if (!BigNumber.from(sender).eq(txSender)) {
+                    logger.throwError("CCIP Read sender did not match", Logger.errors.CALL_EXCEPTION, {
+                        name: "OffchainLookup",
+                        signature: "OffchainLookup(address,string[],bytes,bytes4,bytes)",
+                        transaction, data: result
+                    });
+                }
+
+                // Read the URLs from the response
+                const urls: Array<string> = [];
+                const urlsOffset = BigNumber.from(hexDataSlice(data, 32, 64)).toNumber();
+                const urlsLength = BigNumber.from(hexDataSlice(data, urlsOffset, urlsOffset + 32)).toNumber();
+                const urlsData = hexDataSlice(data, urlsOffset + 32);
+                for (let u = 0; u < urlsLength; u++) {
+                    const url = _parseString(urlsData, u * 32);
+                    if (url == null) {
+                        logger.throwError("CCIP Read contained corrupt URL string", Logger.errors.CALL_EXCEPTION, {
+                            name: "OffchainLookup",
+                            signature: "OffchainLookup(address,string[],bytes,bytes4,bytes)",
+                            transaction, data: result
+                        });
+                    }
+                    urls.push(url);
+                }
+
+                // Get the CCIP calldata to forward
+                const calldata = _parseBytes(data, 64);
+
+                // Get the callbackSelector (bytes4)
+                if (!BigNumber.from(hexDataSlice(data, 100, 128)).isZero()) {
+                    logger.throwError("CCIP Read callback selector included junk", Logger.errors.CALL_EXCEPTION, {
+                        name: "OffchainLookup",
+                        signature: "OffchainLookup(address,string[],bytes,bytes4,bytes)",
+                        transaction, data: result
+                    });
+                }
+                const callbackSelector = hexDataSlice(data, 96, 100);
+
+                // Get the extra data to send back to the contract as context
+                const extraData = _parseBytes(data, 128);
+
+                const ccipResult = await this.ccipReadFetch(<Transaction>transaction, calldata, urls);
+                if (ccipResult == null) {
+                    logger.throwError("CCIP Read disabled or provided no URLs", Logger.errors.CALL_EXCEPTION, {
+                        name: "OffchainLookup",
+                        signature: "OffchainLookup(address,string[],bytes,bytes4,bytes)",
+                        transaction, data: result
+                    });
+                }
+
+                const tx = {
+                    to: txSender,
+                    data: hexConcat([ callbackSelector, encodeBytes([ ccipResult, extraData ]) ])
+                };
+
+                return this._call(tx, blockTag, attempt + 1);
+
+            } catch (error) {
+                if (error.code === Logger.errors.SERVER_ERROR) { throw error; }
+            }
+        }
+
         try {
             return hexlify(result);
         } catch (error) {
             return logger.throwError("bad result from backend", Logger.errors.SERVER_ERROR, {
                 method: "call",
-                params, result, error
+                params: { transaction, blockTag }, result, error
             });
         }
+
+    }
+
+    async call(transaction: Deferrable<TransactionRequest>, blockTag?: BlockTag | Promise<BlockTag>): Promise<string> {
+        await this.getNetwork();
+        const resolved = await resolveProperties({
+            transaction: this._getTransactionRequest(transaction),
+            blockTag: this._getBlockTag(blockTag),
+            ccipReadEnabled: Promise.resolve(transaction.ccipReadEnabled)
+        });
+        return this._call(resolved.transaction, resolved.blockTag, resolved.ccipReadEnabled ? 0: -1);
     }
 
     async estimateGas(transaction: Deferrable<TransactionRequest>): Promise<BigNumber> {
@@ -1736,18 +1952,36 @@ export class BaseProvider extends Provider implements EnsProvider {
 
 
     async getResolver(name: string): Promise<null | Resolver> {
-        try {
-            const address = await this._getResolver(name);
-            if (address == null) { return null; }
-            return new Resolver(this, address, name);
-        } catch (error) {
-            if (error.code === Logger.errors.CALL_EXCEPTION) { return null; }
-            throw error;
+        let currentName = name;
+        while (true) {
+            if (currentName === "" || currentName === ".") { return null; }
+
+            // Optimization since the eth node cannot change and does
+            // not have a wildcard resolver
+            if (name !== "eth" && currentName === "eth") { return null; }
+
+            // Check the current node for a resolver
+            const addr = await this._getResolver(currentName, "getResolver");
+
+            // Found a resolver!
+            if (addr != null) {
+                const resolver = new Resolver(this, addr, name);
+
+                // Legacy resolver found, using EIP-2544 so it isn't safe to use
+                if (currentName !== name && !(await resolver.supportsWildcard())) { return null; }
+
+                return resolver;
+            }
+
+            // Get the parent node
+            currentName = currentName.split(".").slice(1).join(".");
         }
+
     }
 
-    async _getResolver(name: string): Promise<string> {
-        // Get the resolver from the blockchain
+    async _getResolver(name: string, operation?: string): Promise<string> {
+        if (operation == null) { operation = "ENS"; }
+
         const network = await this.getNetwork();
 
         // No ENS...
@@ -1755,22 +1989,22 @@ export class BaseProvider extends Provider implements EnsProvider {
             logger.throwError(
                 "network does not support ENS",
                 Logger.errors.UNSUPPORTED_OPERATION,
-                { operation: "ENS", network: network.name }
+                { operation, network: network.name }
             );
         }
 
-        // keccak256("resolver(bytes32)")
-        const transaction = {
-            to: network.ensAddress,
-            data: ("0x0178b8bf" + namehash(name).substring(2))
-        };
-
         try {
-            return this.formatter.callAddress(await this.call(transaction));
+            // keccak256("resolver(bytes32)")
+            const addrData = await this.call({
+                to: network.ensAddress,
+                data: ("0x0178b8bf" + namehash(name).substring(2))
+            });
+            return this.formatter.callAddress(addrData);
         } catch (error) {
-            if (error.code === Logger.errors.CALL_EXCEPTION) { return null; }
-            throw error;
+            // ENS registry cannot throw errors on resolver(bytes32)
         }
+
+        return null;
     }
 
     async resolveName(name: string | Promise<string>): Promise<null | string> {
@@ -1799,34 +2033,17 @@ export class BaseProvider extends Provider implements EnsProvider {
         address = await address;
         address = this.formatter.address(address);
 
-        const reverseName = address.substring(2).toLowerCase() + ".addr.reverse";
+        const node = address.substring(2).toLowerCase() + ".addr.reverse";
 
-        const resolverAddress = await this._getResolver(reverseName);
-        if (!resolverAddress) { return null; }
+        const resolverAddr = await this._getResolver(node, "lookupAddress");
+        if (resolverAddr == null) { return null; }
 
         // keccak("name(bytes32)")
-        let bytes = arrayify(await this.call({
-            to: resolverAddress,
-            data: ("0x691f3431" + namehash(reverseName).substring(2))
-        }));
+        const name = _parseString(await this.call({
+            to: resolverAddr,
+            data: ("0x691f3431" + namehash(node).substring(2))
+        }), 0);
 
-        // Strip off the dynamic string pointer (0x20)
-        if (bytes.length < 32 || !BigNumber.from(bytes.slice(0, 32)).eq(32)) { return null; }
-        bytes = bytes.slice(32);
-
-        // Not a length-prefixed string
-        if (bytes.length < 32) { return null; }
-
-        // Get the length of the string (from the length-prefix)
-        const length = BigNumber.from(bytes.slice(0, 32)).toNumber();
-        bytes = bytes.slice(32);
-
-        // Length longer than available data
-        if (length > bytes.length) { return null; }
-
-        const name = toUtf8String(bytes.slice(0, length));
-
-        // Make sure the reverse record matches the foward record
         const addr = await this.resolveName(name);
         if (addr != address) { return null; }
 
@@ -1839,15 +2056,35 @@ export class BaseProvider extends Provider implements EnsProvider {
             // Address; reverse lookup
             const address = this.formatter.address(nameOrAddress);
 
-            const reverseName = address.substring(2).toLowerCase() + ".addr.reverse";
+            const node = address.substring(2).toLowerCase() + ".addr.reverse";
 
-            const resolverAddress = await this._getResolver(reverseName);
+            const resolverAddress = await this._getResolver(node, "getAvatar");
             if (!resolverAddress) { return null; }
 
-            resolver = new Resolver(this, resolverAddress, "_", address);
+            // Try resolving the avatar against the addr.reverse resolver
+            resolver = new Resolver(this, resolverAddress, node);
+            try {
+                const avatar = await resolver.getAvatar();
+                if (avatar) { return avatar.url; }
+            } catch (error) {
+                if (error.code !== Logger.errors.CALL_EXCEPTION) { throw error; }
+            }
+
+            // Try getting the name and performing forward lookup; allowing wildcards
+            try {
+                // keccak("name(bytes32)")
+                const name = _parseString(await this.call({
+                    to: resolverAddress,
+                    data: ("0x691f3431" + namehash(node).substring(2))
+                }), 0);
+                resolver = await this.getResolver(name);
+            } catch (error) {
+                if (error.code !== Logger.errors.CALL_EXCEPTION) { throw error; }
+                return null;
+            }
 
         } else {
-            // ENS name; forward lookup
+            // ENS name; forward lookup with wildcard
             resolver = await this.getResolver(nameOrAddress);
             if (!resolver) { return null; }
         }
