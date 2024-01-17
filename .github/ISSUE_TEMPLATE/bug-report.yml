@@ -1,7 +1,7 @@
-name: Bug Report
-description: Open an issue for a bug in Ethers
-title: "Bug Report Title"
-labels: ["investigate"]
+name: "Bug Report v6 (latest)"
+description: "Open an issue for a bug in Ethers v6 (latest)"
+title: "Add Bug Title Here"
+labels: [ "investigate", "v6" ]
 assignees:
   - ricmoo
 body:
@@ -18,7 +18,7 @@ body:
     attributes:
       label: Ethers Version
       description: What version of ethers are you using? Before opening an issue, please make sure you are up to date.
-      placeholder: x.y.z
+      placeholder: 6.y.z
     validations:
       required: true
   - type: input
