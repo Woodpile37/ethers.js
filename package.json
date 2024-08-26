@@ -87,7 +87,7 @@
   "dependencies": {
     "@babel/parser": "7.23.0",
     "@babel/types": "7.23.0",
-    "@ledgerhq/hw-app-eth": "6.32.1",
+    "@ledgerhq/hw-app-eth": "6.38.0",
     "@ledgerhq/hw-transport": "5.26.0",
     "@ledgerhq/hw-transport-u2f": "5.34.0",
     "@types/mocha": "^5.2.0",
